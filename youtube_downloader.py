@@ -2,10 +2,15 @@ import os
 import time
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import SRTFormatter
+import pytube
 from pytube import YouTube
 from pythumb import Thumbnail
 import subprocess
 from urllib.parse import parse_qs, urlparse
+
+# Fixes a "failed to get name" error:
+# https://github.com/pytube/pytube/issues/1473
+pytube.innertube._default_clients['ANDROID']=pytube.innertube._default_clients['WEB']
 
 class TranscriptFetcher:
     def __init__(self, video_id):
@@ -83,9 +88,9 @@ class YouTubeDownloader:
             self.target_language = 'zh-Hans'
 
     def download_video(self):
-        yt = YouTube(self.url)
         count = 0
         while True:
+            yt = YouTube(self.url)
             if count > 5:
                 print("Use tmp.mp4 as the video name")
                 title = 'tmp'
@@ -97,7 +102,6 @@ class YouTubeDownloader:
                 print("Failed to get name. Retrying... Press Ctrl+Z to exit")
                 count += 1    
                 time.sleep(1)
-                yt = YouTube(self.url)
                 continue
 
         title = sanitize_filename(title)
@@ -137,8 +141,12 @@ class YouTubeDownloader:
         
         # Download the video using yt-dlp
         output_filename = os.path.join(video_folder, f"{title}.%(ext)s")
-        youtube_dl_command = f"yt-dlp -f 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]' --merge-output-format mp4 -o \"{output_filename}\" {self.url}"
-        subprocess.run(youtube_dl_command, shell=True, check=True)
+        # Does the file already exist?
+        if os.path.exists(output_filename):
+            print(f"File already exists. Won't download. {output_filename}")
+        else:
+            youtube_dl_command = f"yt-dlp -f 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]' --merge-output-format mp4 -o \"{output_filename}\" {self.url}"
+            subprocess.run(youtube_dl_command, shell=True, check=True)
 
         # Find the downloaded video file
         downloaded_video_path = None
@@ -147,7 +155,8 @@ class YouTubeDownloader:
             # check if the video has been downloaded
             count = 0
             for file in os.listdir(video_folder):
-                if file.endswith(".mp4"):
+                # Make sure it doesn't have ".temp" in the name:
+                if file.endswith(".mp4") and ".temp" not in file:
                     downloaded_video_path = os.path.join(video_folder, file)
                     count += 1
             if count == 1:
