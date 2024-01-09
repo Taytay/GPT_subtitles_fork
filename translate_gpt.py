@@ -7,6 +7,7 @@ import argparse
 import time
 from dotenv import load_dotenv
 import logging
+import sys
 
 def check_for_errors(log_file_path, starting_line):
     # First, check if the log file exists
@@ -210,7 +211,7 @@ def check_response(input_subtitles, translated_subtitles):
         
 
 class Translator:
-    def __init__(self, model='gpt-3.5-turbo-16k', batch_size=40, target_language='zh', source_language='en', titles='Video Title not found', video_info=None, input_path=None, no_translation_mapping=False, load_from_tmp=False):
+    def __init__(self, model='gpt-3.5-turbo-16k', batch_size=40, target_language='en', source_language='en', titles='Video Title not found', video_info=None, input_path=None, no_translation_mapping=False, load_from_tmp=False, verbose=False):
         self.model = model
         self.batch_size = batch_size
         self.target_language = target_language
@@ -218,6 +219,7 @@ class Translator:
         self.titles = titles
         self.video_info = video_info
         self.input_path = input_path
+        self.verbose = verbose
         
         # LRFU (Least Recently/Frequently Used) 
         self.translation_mapping = TranslationMapping(max_size=40)
@@ -228,21 +230,33 @@ class Translator:
         
         self.translate_max_retry = 2
         
+        self.mode = "translate"
+        if self.target_language == "" or self.target_language == None:
+            self.target_language = self.source_language
         
+        if self.source_language == self.target_language: 
+            # In this case, we aren't translating. We are just cleaning.
+            self.mode = "cleanup"
+            print("Detected mode is", self.mode)
+        else:
+            print(f"Detected mode is translate from {self.source_language} to {self.target_language}")
+
         with open('few_shot_examples.json', 'r') as f:
             few_shot_examples = ujson.load(f)
-        
         try:
-            self.few_shot_examples = few_shot_examples[f"{self.source_language}-to-{self.target_language}"]
-            
+            key_name = f"{self.source_language}-to-{self.target_language}"
+            self.few_shot_examples = few_shot_examples[key_name]
+            print(f"Loaded few-shot examples from {key_name}")
         except KeyError:
-            print("No few shot examples found for this language pair. Please add some examples to few_shot_examples.json. Use default examples (en-to-zh)")
-            self.few_shot_examples = few_shot_examples["en-to-zh"]            
+            print("No few shot examples found for this language pair. Please add some examples to few_shot_examples.json. Using default examples (en-to-en)")
+            self.few_shot_examples = few_shot_examples["en-to-en"]            
             
         
         # TODO: use a mapping to transform language code
         if target_language == "zh":
             self.target_language = "Simplified Chinese"
+        elif target_language == "en":
+            self.target_language = "English"
         
         # Setting up the logger
         self.logger = logging.getLogger(__name__)
@@ -252,7 +266,17 @@ class Translator:
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
-        
+
+        if verbose:
+            print("Verbose = true")
+            # Only do this in verbose mode:
+            stream_handler = logging.StreamHandler(stream=sys.stdout)
+            stream_handler.setLevel(logging.DEBUG)
+            stream_handler.setFormatter(formatter)
+            # Add the handler to the logger
+            self.logger.addHandler(stream_handler)
+        else:
+            print("Verbose = false")
         # Setup logger for OpenAI response
         self.openai_logger = logging.getLogger('OpenAI_Response')
         self.openai_logger.setLevel(logging.DEBUG)
@@ -297,7 +321,8 @@ class Translator:
     def send_to_openai(self, subtitles, prev_subtitle, next_subtitle, prev_translated_subtitle, subtitles_length, warning_message=None, prev_response=None):
         total_used_dollars = 0
 
-        system_content = f"""You are a program responsible for translating subtitles. Your task is to translate the current batch of subtitles into {self.target_language} for the video titled '{self.titles}' and follow the guidelines below.
+        if self.mode == "translate":
+            system_content = f"""You are a program responsible for translating subtitles. Your task is to translate the current batch of subtitles into {self.target_language} for the video titled '{self.titles}' and follow the guidelines below.
 Guidelines:
 - Keep in mind that each index should correspond exactly with the original text, and your translation should be faithful to the context of each sentence.
 - Translate with informal slang if necessary, ensuring that the translation is accurate and reflects the context and terminology. Please do not output any text other than the translation. 
@@ -333,7 +358,46 @@ Guidelines:
         "proper nouns": <translation in target language>
     }}
 }}"""
+        elif self.mode == "cleanup": 
+            system_content = f"""You are a program responsible for cleaning and fixing up auto-generated subtitles.
+I will refer to this task as "translating", but it just means cleaning up auto-generated text-to-speech text.
+Your task is to clean up the current batch of subtitles into for the video titled '{self.titles}' and follow the guidelines below.
+Guidelines:
+- Keep in mind that each index should correspond exactly with the original text, and your output should be faithful to the context of each sentence.
+- Clean up with informal slang if necessary, ensuring that the cleanup text is accurate and reflects the context and terminology. Please do not output any text other than the cleaned text.
+- You may remove filler words like "um". Only add words if it's very obvious they were left out of the auto-generated subtitles.
+- Add punctuation if it is obviously missing.
+- You will also receive some additional information for your reference only, such as the previous batch of subtitles, the cleaned version of the previous batch, the next batch of subtitle, and maybe error messages. 
+- Please ensure that each line in the current batch has a corresponding cleaned line. 
+- If the last sentence in the current batch is incomplete, you may ignore the last sentence. If the first sentence in the current batch is incomplete, you may combine the last sentence in the last batch to make the sentence complete. 
+- Please only output the cleaned text of the current batch of subtitles (current_batch_subtitles_translation).
+- Do not put the cleaned text of the next whole sentence in the current sentence.
+- Each index in the current batch of subtitles must correspond to the exact original text and output. Do not combine sentences from different indices.
+- Ensure that the number of lines in the current batch of subtitles is the same as the number of lines in the output.
+- You may keep conversational language if the original text is informal.
+- Additional information for the video: \"\"\"{self.video_info}\"\"\"
+- Please ensure that the output and the original text are matched correctly.
 
+- Please clean the following auto-generated subtitles and summarize all the proper nouns that appear to generate a mapping.
+- Please only output the proper nouns and their cleaned versions that appear in the current batch of subtitles, do not repeat from the input
+- You may receive translation_mapping as input, which is a mapping of proper nouns to their translation in {self.target_language}. 
+- Please follow this mapping to translate the subtitles to improve cleaned output consistency.
+
+- Please output proper JSON with this format:
+{{
+    "current_batch_subtitles_translation": [
+        {{
+            "index": <int>,
+            "original_text": <str>,
+            "translation": <str>
+        }}
+    ],
+    "translation_mapping": {{
+        "proper nouns": <translation in target language>
+    }}
+}}"""
+        else:
+            raise Error("Unknown mode: "+ self.mode)
         user_input = self.process_user_input(subtitles, prev_subtitle, next_subtitle, prev_translated_subtitle, warning_message)
         
         messages = [
@@ -374,7 +438,8 @@ Guidelines:
                 self.openai_logger.handlers[0].terminator = ''
                 for event in response: 
                     # STREAM THE ANSWER
-                    # print(answer, end='', flush=True) 
+                    if self.verbose:
+                        print(answer, end='', flush=True) 
                     self.openai_logger.info(answer) 
                     self.openai_logger.handlers[0].flush()
                     # RETRIEVE THE TEXT FROM THE RESPONSE
@@ -634,7 +699,7 @@ Guidelines:
         
         return translated
 
-def translate_with_gpt(input_file, target_language='zh', source_language='en', batch_size=40, model='gpt-3.5-turbo-16k', video_info=None, no_translation_mapping=False, load_from_tmp=False):
+def translate_with_gpt(input_file, target_language='zh', source_language='en', batch_size=40, model='gpt-3.5-turbo-16k', video_info=None, no_translation_mapping=False, load_from_tmp=False, verbose=False):
     # check log file
     log_file_path = os.path.join(os.path.dirname(input_file), 'translator.log')
     starting_line = count_log_lines(log_file_path)
@@ -644,7 +709,7 @@ def translate_with_gpt(input_file, target_language='zh', source_language='en', b
     
     subtitle = Subtitle(input_file)
     translator = Translator(model=model, batch_size=batch_size, target_language=target_language, source_language=source_language, 
-        titles=file_name, video_info=video_info, input_path=input_file, no_translation_mapping=no_translation_mapping, load_from_tmp=load_from_tmp)
+        titles=file_name, video_info=video_info, input_path=input_file, no_translation_mapping=no_translation_mapping, load_from_tmp=load_from_tmp, verbose=verbose)
 
     subtitle_batches, timestamps_batches = subtitle.get_processed_batches_and_timestamps(batch_size)
     translated_subtitles = translator.batch_translate(subtitle_batches, timestamps_batches)
@@ -661,17 +726,18 @@ def main():
     parser.add_argument('-i', '--input_file', help='The path to the input subtitle file.', type=str, required=True)
     # parser.add_argument('-o', '--output_file', help='The path to the output subtitle file.', type=str, required=True)
     parser.add_argument('-b', '--batch_size', help='The number of subtitles to process in a batch.', type=int, default=12)
-    parser.add_argument('-l', '--target_language', help='The target language for translation.', default='zh')
+    parser.add_argument('-l', '--target_language', help='The target language for translation.', default='en')
     parser.add_argument('-s', '--source_language', help='The source language for translation.', default='en')
     parser.add_argument('-v', "--video_info", type=str, default="", help="Additional information about the video.")
     parser.add_argument('-m', '--model', default='gpt-3.5-turbo-16k', help='Model for OpenAI API, default to gpt-3.5-turbo-16k', type=str)
     parser.add_argument('-um', "--no_mapping", action='store_true', help="don't use translation mapping as input to the model" )
     parser.add_argument('-lt', "--load_tmp_file", action='store_true', help="load the previous translated subtitles, assume previous tmp file generated with the same setting as the current run")
-    
+    parser.add_argument('--verbose', action='store_true', help="Use verbose logging", default=False )
     args = parser.parse_args()
 
+    print("Parsed args:", args)
     translate_with_gpt(args.input_file, args.target_language, args.source_language, 
-                args.batch_size , args.model, args.video_info, args.no_mapping, args.load_tmp_file)
+                args.batch_size , args.model, args.video_info, args.no_mapping, args.load_tmp_file, args.verbose)
 
 
 

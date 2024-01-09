@@ -139,14 +139,14 @@ class SubtitleProcessor:
     def transcribe_audio(self):
         if self.model == 'large':
             self.model = 'large-v3'
-            
+
+        print(f"Transcribing audio of {self.video_path}")    
         model = WhisperModel(self.model, device="cuda", compute_type="float16")
         # or run on GPU with INT8
         # model = WhisperModel(model_size, device="cuda", compute_type="int8_float16")
         # or run on CPU with INT8
         # model = WhisperModel(model_size, device="cpu", compute_type="int8")
         
-        print("Transcribing audio...")
         segments, info = model.transcribe(self.video_path, word_timestamps=True, vad_filter=True, vad_parameters=dict(min_silence_duration_ms=500))
         
         print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
@@ -320,11 +320,13 @@ class SubtitleProcessor:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Download YouTube video, transcribe, translate and add dual subtitles.')
     parser.add_argument('--youtube_url', help='The URL of the YouTube video.', type=str)
+    parser.add_argument('--output_folder', help='The folder to download the video and transcripts. Defaults to the video title.', type=str)
     parser.add_argument('--local_video', help='The path to the local video file.', type=str)
-    parser.add_argument('--target_language', help='The target language for translation.', default='zh')
+    parser.add_argument('--target_language', help='The target language for translation.', default='en')
     parser.add_argument('--model', help="""Choose one of the Whisper model""", default='small', type=str, choices=['tiny', 'base', 'small', 'medium', 'large'])
     parser.add_argument('--translation_method', help='The method to use for translation. Options: "m2m100" or "google" or "whisper" or "gpt"', default='google', choices=['m2m100', 'google', 'whisper', 'gpt', 'no_translate'])
-    parser.add_argument('--no_transcribe', action='store_true', help="don't transcribe the video" )
+    parser.add_argument('--no_transcribe', action='store_true', help="don't transcribe the video")
+
 
     args = parser.parse_args()
 
@@ -337,7 +339,7 @@ if __name__ == "__main__":
     # Download the YouTube video or use the local video file
     if args.youtube_url: 
         from youtube_downloader import YouTubeDownloader
-        video_filename = YouTubeDownloader(args.youtube_url, args.target_language).download_video()
+        video_filename = YouTubeDownloader(args.youtube_url, args.target_language).download_video(args.output_folder)
     else:
         print("Local video file: " + args.local_video)
         video_filename = args.local_video
